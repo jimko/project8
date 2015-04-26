@@ -1,0 +1,185 @@
+---
+title: "Project 8 - Prediction of Weightlifting Activity"
+output: html_document
+---
+<!-- coursera.org/predmachlearn-013-->
+<!-- author: "Jim Kolberg" -->
+<!-- date: "04/24/2015" -->
+## Introduction
+The goal of this project is to use a set of sensor data collected during a weight lifting exercise to predict if the subject performed the exercise in good form or made one of four errors in form. The form was judged by an expert and assigned a category that was recorded along with the sensor data.
+
+Boilerplate code to fetch the data is reproduced in Appendix 1.
+```{r init, echo=FALSE}
+library("caret")
+library("ggplot2")
+library(doParallel)
+
+ProjectDir <- "~/R/Class8/project"
+dataURLTrn <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+dataURLTst <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+dataFileTrn <- "pml-training.csv"
+dataFileTst <- "pml-testing.csv"
+now <- Sys.time()
+setwd(ProjectDir)
+
+#Check to see if the expected data files exist. Download if necessary. Then show the hash signature of the file used.
+if (file.exists(dataFileTrn)){
+    md5Trn <- system2("md5sum",args=c(dataFileTrn), stdout=TRUE)
+    message(paste("Reusing the existing data file with MD5 hash:",md5Trn))        
+} else {
+    
+    download.file(dataURLTrn, dataFileTrn, "wget", quiet = TRUE)
+    message(paste("Got a fresh download of the data",now))
+}
+
+if (file.exists(dataFileTst)){
+    md5Tst <- system2("md5sum",args=c(dataFileTst), stdout=TRUE)
+    message(paste("Reusing the existing data file with MD5 hash:",md5Tst))        
+} else {
+    download.file(dataURLTst, dataFileTst, "wget", quiet = TRUE)
+    message(paste("Got a fresh download of the data",now))
+}
+
+set.seed(97)
+
+#If our variables are not in the workspace, load up the csv file. Otherwise carry on
+if ( ! exists("dfTrn")) {
+    dfTrn <- read.csv(dataFileTrn, header=TRUE, sep=",")
+}
+if ( ! exists("dfTst")) {
+    dfTst <- read.csv(dataFileTst, header=TRUE, sep=",")
+}
+```
+## How not to build a model
+I initially tried and failed on various attempts. The general linear method was not working because the data is not linear and the outcome was not binary. I tried PCA preprocessing, but encountered technical problems and errors I could not resolve. My initial glimmer of success came from the rpart method with no preprocessing or cross validation, but predictions accuracy was under 40%.
+
+To resolve the technical problems, I made a model with only a couple predictors, the outcome variable, and the problem-id variable. To this, I gradually added training and preprocessing options. The submitted results used the following predictors.
+
+Anyone who really understands the mathmetics would rightfully accuse me of a brute force approach of throwing hardware at a problem, and that would be justified, but it got results. 
+```{r variables,tidy=TRUE, tidy.opts=list(width.cutoff=60)}
+predictors <- c("roll_belt","pitch_belt","yaw_belt","total_accel_belt","gyros_belt_x","gyros_belt_y","gyros_belt_z",
+           "accel_belt_x","accel_belt_y","accel_belt_z","roll_arm","pitch_arm",
+           "yaw_arm","total_accel_arm","gyros_arm_x","gyros_arm_y","gyros_arm_z","accel_arm_x","accel_arm_y","accel_arm_z",
+           "roll_dumbbell","pitch_dumbbell","yaw_dumbbell","total_accel_dumbbell",
+           "gyros_dumbbell_x","gyros_dumbbell_y","gyros_dumbbell_z","accel_dumbbell_x","accel_dumbbell_y","accel_dumbbell_z",
+           "roll_forearm","pitch_forearm","yaw_forearm",
+           "total_accel_forearm","gyros_forearm_x","gyros_forearm_y","gyros_forearm_z","accel_forearm_x","accel_forearm_y",
+           "accel_forearm_z")
+excluded <- c("magnet_belt_x","magnet_belt_y","magnet_belt_z","magnet_arm_x","magnet_arm_y","magnet_arm_z",
+              "magnet_dumbbell_x","magnet_dumbbell_y","magnet_dumbbell_z","magnet_forearm_x","magnet_forearm_y","magnet_forearm_z")
+outcome <- "classe"
+othervar <- "problem_id"
+```
+By trial and error, I adjusted the options until I got an accuracy rate on the training set that looked promising. For each trial, I would run a confusion matrix and print the accuracy metric of the final model. The cross validation training options provided the most improvement in prediction accuracy. A fold size between 10 and 20 that was repeated 5 times gave me a 99.5% in sample accuracy rate on the training set. Preprocessing with simple scale & center operations seemed fast and easy.
+
+My initial efforts focused on performing a PCA on the training set to reduce the number of variables. For still unresolved technical reasons, I couldn't get this to make a prediction. So fall back plan was to use all variables except the derived summary variables that were mostly N/A. This is arbitrary and sub-optimal, but produced twenty correct predictions. 
+
+## Cross Validation and Training
+The training set and the test set must have a set of columns in common that can be used as the predictors. There must be a labeled outcome variable in the training set. If the outcome is also available in the test set, it can be excluded but that was not the case here.
+
+My method to select a training algorithm was to try a few that were covered in lecture and some that seemed popular (frequently appeared) in R forums. It was through this I tried the Random Forest (rf) method. The generalized linear model (glm) failed me because outcomes need to be binary. The recursive partitioning (rpart) succeeded but accuracy scores were low and I couldn't see how to tune it. 
+
+The downside to my "use them all" strategy of variable selection was training time. The random forest model ran for several hours. Online comments suggest that runtime grows quadratically with the number of variables in an (rf) analysis. Excluding a dozen "magnet" variables, and reducingthe number of cross-validation repitions to 3 cut the runtime to about 30 minutes without any appreciable loss in accuracy.
+
+```{r train, eval=FALSE}
+cl <- makeCluster(detectCores())
+registerDoParallel(cl)
+
+tc <- trainControl(method="repeatedcv", allowParallel=TRUE, number=15, repeats=3) #99.5% when metho="rf"
+fit <- train(classe ~ ., trControl=tc, 
+             method="rf", 
+             preProcess=c("center","scale"), 
+             data=dfTrn[,c(predictors,outcome)])
+```
+## Predictions and Error Rates
+```{r predicts}
+P1 <- predict(fit, dfTrn[,c(predictors,outcome)])
+P2 <- predict(fit, newdata=dfTst[,c(predictors,othervar)])
+confusionMatrix(fit)
+print(fit)
+```
+This model has an in-sample accuracy rate of 99.5% against the training set. I determined this by summing the percents of corretly predicted variables alonge the diagonal of the confusion matriz output.
+
+## Opportunities for improvement
+Given the time, I would have liked to experiment further with the principle component pre processing method to minimize the number of predictors used in training. This exercise had an unlabeled test set. I should have set aside some fraction of the training set to use as a labeled "pre test" set. That would have allowed me to determine out of sample accuraccy.
+
+
+## Acknowledgements
+* The data set used in this report comes from [Qualitative Activity Recognition of Weight Lifting Exercises.](http://groupware.les.inf.puc-rio.br/work.jsf?p1=11201) By Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. 2013
+* Helpful information on [parallelism](https://class.coursera.org/predmachlearn-013/forum/thread?thread_id=100) was provided by [Saif Shaikh](https://class.coursera.org/predmachlearn-013/forum/profile?user_id=10847185) in the Coursera class discussion forums.
+* This work is free to use under the CC BY-SA
+
+# Appendix 1: Boilerplate Code
+Handy stuff to get the files and initialize the environment but isn't very analytically interesting.
+```{r appx1, eval=FALSE}
+library("caret")
+library("ggplot2")
+library(doParallel)
+
+ProjectDir <- "~/R/Class8/project"
+dataURLTrn <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+dataURLTst <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+dataFileTrn <- "pml-training.csv"
+dataFileTst <- "pml-testing.csv"
+now <- Sys.time()
+setwd(ProjectDir)
+
+#Check to see if the expected data files exist. Download if necessary. Then show the hash signature of the file used.
+if (file.exists(dataFileTrn)){
+    md5Trn <- system2("md5sum",args=c(dataFileTrn), stdout=TRUE)
+    message(paste("Reusing the existing data file with MD5 hash:",md5Trn))        
+} else {
+    
+    download.file(dataURLTrn, dataFileTrn, "wget", quiet = TRUE)
+    message(paste("Got a fresh download of the data",now))
+}
+
+if (file.exists(dataFileTst)){
+    md5Tst <- system2("md5sum",args=c(dataFileTst), stdout=TRUE)
+    message(paste("Reusing the existing data file with MD5 hash:",md5Tst))        
+} else {
+    download.file(dataURLTst, dataFileTst, "wget", quiet = TRUE)
+    message(paste("Got a fresh download of the data",now))
+}
+
+set.seed(97)
+
+#If our variables are not in the workspace, load up the csv file. Otherwise carry on
+if ( ! exists("dfTrn")) {
+    dfTrn <- read.csv(dataFileTrn, header=TRUE, sep=",")
+}
+if ( ! exists("dfTst")) {
+    dfTst <- read.csv(dataFileTst, header=TRUE, sep=",")
+}
+```
+
+# Appendix 2: All the failures
+A log of rejected methods and options. Plus the clue that got me started.
+```{r bad, eval=FALSE}
+pproc1 <- preProcess(log10(abs(dfTrn[,keepers])+1)* sign(dfTrn[,keepers]), method="pca",  na.remove = TRUE, thresh=.80)
+trnPCA <- predict(pproc1, log10(abs(dfTrn[,keepers])+1)* sign(dfTrn[,keepers]))
+
+tc <- trainControl(method="repeatedcv", number=10, repeats=3)
+tc <- trainControl(method="repeatedcv", number=30, repeats=9)
+tc <- trainControl(method="boot",number=10, repeats=30)
+tc <- trainControl(method="repeatedcv", number=10, repeats=3)  #83%
+tc <- trainControl(method="boot",number=10, repeats=3)         #71%
+tc <- trainControl(method="repeatedcv", number=30, repeats=3)  #91%
+tc <- trainControl(method="repeatedcv", number=10, repeats=9)  #83%
+tc <- trainControl(method="repeatedcv", number=15, repeats=15) #88%
+
+fit <- train(dfTrn$classe ~ ., method="rpart", data=trnPCA)
+fit <- train(dfTrn$classe ~ ., trControl=tc, method="rpart", data=trnPCA)
+fit <- train(dfTrn$classe ~ ., trControl=tc, method="rpart", data=trnPCA)
+fit <- train(dfTrn$classe ~ ., trControl=tc, method="rpart", data=trnPCA)
+
+# The simple-case that worked and got me onthe right track
+set.seed(97)
+myTrain <- dfTrn[sample(20000, size=50), c("roll_belt","pitch_belt","yaw_belt","classe")]
+myTest <- dfTst[, c("roll_belt","pitch_belt","yaw_belt","problem_id")]
+
+tc <- trainControl(method="repeatedcv", number=30, repeats=9) 
+fit <- train(classe ~ ., trControl=tc, preProcess=c("center", "scale"), method="rpart", data=myTrain)
+P1 <- predict(fit, myTrain)
+P2 <- predict(fit, newdata=myTest)
+```
